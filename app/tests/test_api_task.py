@@ -250,6 +250,9 @@ class TestApiTask(BootTransactionTestCase):
             # No processing node is set
             self.assertTrue(task.processing_node is None)
 
+            # EPSG should be null
+            self.assertTrue(task.epsg is None)
+
             # tiles.json, bounds, metadata should not be accessible at this point
             tile_types = ['orthophoto', 'dsm', 'dtm']
             endpoints = ['tiles.json', 'bounds', 'metadata']
@@ -274,7 +277,7 @@ class TestApiTask(BootTransactionTestCase):
             # Cannot download assets (they don't exist yet)
             for asset in list(task.ASSETS_MAP.keys()):
                 res = client.get("/api/projects/{}/tasks/{}/download/{}".format(project.id, task.id, asset))
-                self.assertTrue(res.status_code == status.HTTP_404_NOT_FOUND)
+                self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
 
             # Cannot access raw assets (they don't exist yet)
             res = client.get("/api/projects/{}/tasks/{}/assets/odm_orthophoto/odm_orthophoto.tif".format(project.id, task.id))
@@ -318,6 +321,7 @@ class TestApiTask(BootTransactionTestCase):
             # Processing should have started and a UUID is assigned
             # Calling process pending tasks should finish the process
             # and invoke the plugins completed signal
+            time.sleep(0.5)
             task.refresh_from_db()
             self.assertTrue(task.status in [status_codes.RUNNING, status_codes.COMPLETED])  # Sometimes this finishes before we get here
             self.assertTrue(len(task.uuid) > 0)
@@ -374,13 +378,8 @@ class TestApiTask(BootTransactionTestCase):
             self.assertTrue(valid_cogeo(task.assets_path(task.ASSETS_MAP["dsm.tif"])))
             self.assertTrue(valid_cogeo(task.assets_path(task.ASSETS_MAP["dtm.tif"])))
 
-            # A textured mesh archive file should exist
-            self.assertTrue(os.path.exists(task.assets_path(task.ASSETS_MAP["textured_model.zip"]["deferred_path"])))
-
-            # Tiles archives should have been created
-            self.assertTrue(os.path.exists(task.assets_path(task.ASSETS_MAP["dsm_tiles.zip"]["deferred_path"])))
-            self.assertTrue(os.path.exists(task.assets_path(task.ASSETS_MAP["dtm_tiles.zip"]["deferred_path"])))
-            self.assertTrue(os.path.exists(task.assets_path(task.ASSETS_MAP["orthophoto_tiles.zip"]["deferred_path"])))
+            # A textured mesh archive file should not exist (it's generated on the fly)
+            self.assertFalse(os.path.exists(task.assets_path(task.ASSETS_MAP["textured_model.zip"]["deferred_path"])))
 
             # Can download raw assets
             res = client.get("/api/projects/{}/tasks/{}/assets/odm_orthophoto/odm_orthophoto.tif".format(project.id, task.id))
@@ -414,6 +413,14 @@ class TestApiTask(BootTransactionTestCase):
                 self.assertEqual(i.height, 3)
 
             res = client.get("/api/projects/{}/tasks/{}/images/thumbnail/tiny_drone_image.jpg?size=9999999".format(project.id, task.id))
+            self.assertTrue(res.status_code == status.HTTP_200_OK)
+            with Image.open(io.BytesIO(res.content)) as i:
+                # Thumbnail has been resized to the max allowed (oringinal image size)
+                self.assertEqual(i.width, 48)
+                self.assertEqual(i.height, 36)
+
+            # Can plot points, recenter thumbnails, zoom
+            res = client.get("/api/projects/{}/tasks/{}/images/thumbnail/tiny_drone_image.jpg?size=9999999&center_x=0.3&center_y=0.2&draw_point=0.4,0.4&point_color=ff0000&point_radius=3&zoom=2".format(project.id, task.id))
             self.assertTrue(res.status_code == status.HTTP_200_OK)
             with Image.open(io.BytesIO(res.content)) as i:
                 # Thumbnail has been resized to the max allowed (oringinal image size)
@@ -475,8 +482,8 @@ class TestApiTask(BootTransactionTestCase):
             for f in fields:
                 self.assertTrue(f in metadata)
 
-            self.assertEqual(metadata['minzoom'], 17 - ZOOM_EXTRA_LEVELS)
-            self.assertEqual(metadata['maxzoom'], 17 + ZOOM_EXTRA_LEVELS)
+            self.assertEqual(metadata['minzoom'], 18 - ZOOM_EXTRA_LEVELS)
+            self.assertEqual(metadata['maxzoom'], 18 + ZOOM_EXTRA_LEVELS)
 
             # Colormaps and algorithms should be empty lists
             self.assertEqual(metadata['algorithms'], [])
@@ -566,8 +573,8 @@ class TestApiTask(BootTransactionTestCase):
 
                 # Min/max values are what we expect them to be
                 self.assertEqual(len(metadata['statistics']), 1)
-                self.assertEqual(round(metadata['statistics']['1']['min'], 2), 156.92)
-                self.assertEqual(round(metadata['statistics']['1']['max'], 2), 164.88)
+                self.assertEqual(round(metadata['statistics']['1']['min'], 2), 156.91)
+                self.assertEqual(round(metadata['statistics']['1']['max'], 2), 164.94)
 
             # Can access individual tiles
             for tile_type in tile_types:
@@ -651,6 +658,11 @@ class TestApiTask(BootTransactionTestCase):
                 ("orthophoto", "formula=NDVI&bands=RGN&color_map=rdylgn&rescale=1,-1", status.HTTP_200_OK),
 
                 ("orthophoto", "formula=NDVI&bands=RGN&color_map=invalid", status.HTTP_400_BAD_REQUEST),
+
+                ("orthophoto", "boundaries=invalid", status.HTTP_400_BAD_REQUEST),
+                ("orthophoto", "boundaries=%7B%22a%22%3A%20true%7D", status.HTTP_400_BAD_REQUEST),
+                
+                ("orthophoto", "boundaries=%7B%22type%22%3A%22Feature%22%2C%22properties%22%3A%7B%22Length%22%3A52.98642774268887%2C%22Area%22%3A139.71740455567166%7D%2C%22geometry%22%3A%7B%22type%22%3A%22Polygon%22%2C%22coordinates%22%3A%5B%5B%5B-91.993925%2C46.842686%5D%2C%5B-91.993928%2C46.842756%5D%2C%5B-91.994024%2C46.84276%5D%2C%5B-91.994018%2C46.842582%5D%2C%5B-91.993928%2C46.842585%5D%2C%5B-91.993925%2C46.842686%5D%5D%5D%7D%7D", status.HTTP_200_OK)
             ]
 
             for k in algos:
@@ -858,7 +870,7 @@ class TestApiTask(BootTransactionTestCase):
 
         # Restart node-odm as to not generate orthophotos
         testWatch.clear()
-        with start_processing_node("--test_skip_orthophotos"):
+        with start_processing_node(["--test_skip_orthophotos"]):
             res = client.post("/api/projects/{}/tasks/".format(project.id), {
                 'images': [image1, image2],
                 'name': 'test_task_no_orthophoto',
@@ -886,6 +898,9 @@ class TestApiTask(BootTransactionTestCase):
             self.assertTrue(task.dtm_extent is not None)
             self.assertTrue(os.path.exists(task.assets_path("dsm_tiles")))
             self.assertTrue(os.path.exists(task.assets_path("dtm_tiles")))
+
+            # EPSG should be populated
+            self.assertEqual(task.epsg, 32615)
 
             # Can access only tiles of available assets
             res = client.get("/api/projects/{}/tasks/{}/dsm/tiles.json".format(project.id, task.id))
